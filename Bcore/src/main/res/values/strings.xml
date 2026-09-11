@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="black_box_service_name">:akro_engine_server</string>
+    <string name="app_icon">AKRO</string>
+</resources>

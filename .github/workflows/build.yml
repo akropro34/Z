@@ -1,0 +1,152 @@
+name: AKROGOXI Pro Build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ── تم تعديل إصدار NDK ليتطابق مع ndkVersion في build.gradle ──
+      - name: Install NDK & CMake
+        run: |
+          echo "y" | sdkmanager "ndk;24.0.8215888"
+          echo "y" | sdkmanager "cmake;3.22.1"
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Clean and Build APK
+        id: build
+        run: |
+          ./gradlew clean assembleDebug assembleRelease --stacktrace 2>&1 | tee build_output.txt
+          exit ${PIPESTATUS[0]}
+
+      - name: Get version info
+        if: success()
+        id: version
+        run: |
+          echo "build_date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+          echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      # ── رفع على GoFile (APK مباشر بدون zip) ──────────────────────────
+      - name: Upload APKs to GoFile
+        if: success()
+        id: gofile
+        run: |
+          # جيب أحسن server
+          SERVER=$(curl -s "https://api.gofile.io/servers" | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['servers'][0]['name'])")
+          echo "Server: $SERVER"
+
+          upload_apk() {
+            local APK_PATH="$1"
+            if [ ! -f "$APK_PATH" ]; then echo "N/A"; return; fi
+            curl -s \
+              -F "file=@${APK_PATH}" \
+              "https://${SERVER}.gofile.io/uploadFile" | \
+              python3 -c "
+          import sys, json
+          try:
+              d = json.load(sys.stdin)
+              print(d['data']['downloadPage'])
+          except:
+              print('Upload failed')
+          "
+          }
+
+          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
+          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+
+          echo "Uploading Debug APK: $DEBUG_APK"
+          DEBUG_LINK=$(upload_apk "$DEBUG_APK")
+          echo "DEBUG_LINK=$DEBUG_LINK" >> $GITHUB_OUTPUT
+          echo "✅ Debug: $DEBUG_LINK"
+
+          echo "Uploading Release APK: $RELEASE_LINK"
+          RELEASE_LINK=$(upload_apk "$RELEASE_LINK")
+          echo "RELEASE_LINK=$RELEASE_LINK" >> $GITHUB_OUTPUT
+          echo "✅ Release: $RELEASE_LINK"
+
+      # ── Job Summary ────────────────────────────────────────────────────
+      - name: Print Download Links
+        if: success()
+        run: |
+          echo "## 📦 AKROGOXI Build — ${{ steps.version.outputs.short_sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🌐 GoFile (APK مباشر)" >> $GITHUB_STEP_SUMMARY
+          echo "| | Link |" >> $GITHUB_STEP_SUMMARY
+          echo "|--|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🐛 Debug | ${{ steps.gofile.outputs.DEBUG_LINK }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🚀 Release | ${{ steps.gofile.outputs.RELEASE_LINK }} |" >> $GITHUB_STEP_SUMMARY
+
+      # ── GitHub Artifacts (احتياطي فقط، تتمسح بعد يوم) ───────────────
+      - name: Upload Debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Debug-${{ steps.version.outputs.short_sha }}
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 1
+
+      - name: Upload Release APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Release-${{ steps.version.outputs.short_sha }}
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 1
+
+      # ── Failure Report ─────────────────────────────────────────────────
+      - name: Generate Failure Report
+        if: failure()
+        run: |
+          python3 << 'PYEOF'
+          from datetime import datetime
+          def read(p):
+              try:
+                  with open(p, 'r', errors='ignore') as f: return f.read()
+              except: return ""
+          build_log = read("build_output.txt")
+          now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+          lines = build_log.split('\n')
+          error_keywords = ['error:', 'fatal error:', 'FAILED', 'Exception', 'AAPT: error:']
+          errors = []
+          for i, line in enumerate(lines):
+              if any(k in line for k in error_keywords):
+                  block = '\n'.join(lines[max(0,i-2):min(len(lines),i+8)])
+                  if block not in errors:
+                      errors.append(block)
+          report = ["="*70, "  AKROGOXI BUILD FAILURE REPORT", f"  Date: {now}", "="*70]
+          for i, err in enumerate(errors[:15], 1):
+              report += [f"\n--- Error #{i} ---", err]
+          with open("BUILD_FAILURE_REPORT.txt", 'w') as f:
+              f.write('\n'.join(report))
+          PYEOF
+
+      - name: Upload Failure Report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FAILURE-REPORT
+          path: BUILD_FAILURE_REPORT.txt
+          retention-days: 1

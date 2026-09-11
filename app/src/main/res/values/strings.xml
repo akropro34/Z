@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">AKRO LOADER</string>
+    <string name="black_box_service_name">:akro_engine_server</string>
+</resources>
